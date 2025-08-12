@@ -14,8 +14,10 @@ uint8_t adc1 = PB3;     // a input     // for analog sensor
 uint8_t sen_v_en = PA9; // d output    // to mosfet gate 
 
 
-// adfafda
+// nuevas variables
 uint8_t count_int = 0;
+volatile uint8_t presscount = 0;
+volatile uint32_t lastActivityMs = 0;   // tiempo del último press (ms)
 
 
 const uint8_t HEADER_HIGH = 0xEF;
@@ -73,6 +75,13 @@ struct values {
 void blink1()
 {
     press = true;
+    if (presscount < 255){
+      presscount ++;
+    }
+    else if (presscount>2){
+      presscount = 0;
+    }
+    
 }
 
 
@@ -140,6 +149,8 @@ void setup() {
 }
 
 void loop() {
+//Serial.println(presscount);
+
 
 if (count_int<2){
   send_get_image_cmd(CMD_GET_IMAGE);
@@ -244,31 +255,55 @@ if(press){
 //
 static bool busy = false;
 const uint32_t HOLD_MATCH_MS = 1000;
-  if (!busy && waitHoldRearm(INT1, HOLD_MATCH_MS)) {
-    busy = true;                   // << evita reentradas
+const uint32_t HOLD_ENROLL_MS = 5000;
+uint8_t pc;
+noInterrupts();
+pc = presscount;
+interrupts();
 
-    digitalWrite(gps_v_en, LOW);
-    delay(300);                    // startup sensor
-    send_get_image_cmd(CMD_GET_IMAGE);
-    send_cmd2(CMD_GEN_CHAR, 0x06);
-    response_codes = sendCommand1(CMD_SEARCH, 1, 1, 1);
+if (!busy && pc >= 2 && waitHoldRearm(INT1, HOLD_ENROLL_MS)) {
+  busy = true;
 
-    Serial.printf("confirmation code: %02X \r\n", response_codes.confirmation);
-    Serial.printf("page number:       %02X \r\n", response_codes.page);
-    Serial.printf("score:             %02X \r\n", response_codes.score);
-    Serial.printf("\r\n");
+  // lo que necesites antes...
+  digitalWrite(gps_v_en, LOW);
+  delay(300);
+  enrroll();
+  //delay(100);
+  resetPressCounter();  
+  busy = false;
+}
+// Luego MATCH (exactamente 1 presión y 1 s)
+else if (!busy && pc == 1 && waitHoldRearm(INT1, HOLD_MATCH_MS)) {
+  busy = true;
 
-    if (response_codes.confirmation == 0x09) {
-      sendCommand_led(CMD_PS_ControlBLN, 0X03, B0100);
-      sendCommand_led(CMD_PS_ControlBLN, 0X03, 0B000);
-    }
-    if (response_codes.confirmation == 0x00 && response_codes.score > 0x08) {
-      sendCommand_led(CMD_PS_ControlBLN, 0X03, B0010);
-      sendCommand_led(CMD_PS_ControlBLN, 0X03, 0B000);
-    }
+  digitalWrite(gps_v_en, LOW);
+  delay(300);
+  send_get_image_cmd(CMD_GET_IMAGE);
+  send_cmd2(CMD_GEN_CHAR, 0x06);
+  response_codes = sendCommand1(CMD_SEARCH, 1, 1, 1);
 
-    busy = false;                  // << listo para el próximo intento
+  Serial.printf("confirmation code: %02X \r\n", response_codes.confirmation);
+  Serial.printf("page number:       %02X \r\n", response_codes.page);
+  Serial.printf("score:             %02X \r\n", response_codes.score);
+  Serial.printf("\r\n");
+
+  // usa literales binarios estándar (recomendado):
+  if (response_codes.confirmation == 0x09) {
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0100);
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
   }
+  if (response_codes.confirmation == 0x00 && response_codes.score > 0x08) {
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0010);
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
+  }
+
+  // reset contador
+  resetPressCounter();
+
+  busy = false;
+} 
+
+Serial.println(pc);
 
 // termina loop 
 }
@@ -953,6 +988,26 @@ bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs) {
   return false;
 }
 
+void enrroll(){
+    // register fingerprint
 
+    send_get_image_cmd(CMD_GET_IMAGE);
+    delay(100);
+    
+    send_cmd2(CMD_GEN_CHAR,0x06);
+    delay(100);
 
+    merge_feature_cmd(CMD_REG_MODEL);
+    delay(100);
+
+    sendCommand(CMD_STORE_CHAR,6,3); // command store, buffer id, page id, juan 1,2. sam 3
+    delay(1000);
+}
+
+inline void resetPressCounter() {
+  noInterrupts();
+  presscount = 0;
+  press = false;        // opcional: limpia también el flag del edge
+  interrupts();
+}
 
