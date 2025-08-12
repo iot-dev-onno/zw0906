@@ -151,7 +151,7 @@ void setup() {
 void loop() {
 //Serial.println(presscount);
 
-
+// parte para tener el encabezado correcto
 if (count_int<2){
   send_get_image_cmd(CMD_GET_IMAGE);
   send_cmd2(CMD_GEN_CHAR,0x06);
@@ -256,26 +256,35 @@ if(press){
 static bool busy = false;
 const uint32_t HOLD_MATCH_MS = 1000;
 const uint32_t HOLD_ENROLL_MS = 5000;
+
 uint8_t pc;
-noInterrupts();
+//noInterrupts();
+deatachInterrupt(INT1);
 pc = presscount;
-interrupts();
+attachInterrupt(INT1);
+//interrupts();
 
 if (!busy && pc >= 2 && waitHoldRearm(INT1, HOLD_ENROLL_MS)) {
   busy = true;
 
-  // lo que necesites antes...
-  digitalWrite(gps_v_en, LOW);
+  detachInterrupt(INT1);
+  digitalWrite(gps_v_en, LOW);  // LOW FOR POWER UP THE MODULE
   delay(300);
   enrroll();
-  //delay(100);
-  resetPressCounter();  
+  //resetPressCounter();  
+  presscount = 0;
+  press = false;
+  digitalWrite(gps_v_en, HIGH); // keep off (HIGH) for low power 
+  delay(50);
+  attachInterrupt(INT1, blink1, RISING);
   busy = false;
+  delay(300);
 }
 // Luego MATCH (exactamente 1 presión y 1 s)
 else if (!busy && pc == 1 && waitHoldRearm(INT1, HOLD_MATCH_MS)) {
   busy = true;
 
+  detachInterrupt(INT1);
   digitalWrite(gps_v_en, LOW);
   delay(300);
   send_get_image_cmd(CMD_GET_IMAGE);
@@ -298,10 +307,15 @@ else if (!busy && pc == 1 && waitHoldRearm(INT1, HOLD_MATCH_MS)) {
   }
 
   // reset contador
-  resetPressCounter();
-
+  //resetPressCounter();
+  presscount = 0;
+  press = false;
+  digitalWrite(gps_v_en, HIGH); // keep off (HIGH) for low power 
+  delay(50);
+  attachInterrupt(INT1, blink1, RISING);
   busy = false;
-} 
+  delay(300);
+} else if ()
 
 Serial.println(pc);
 
