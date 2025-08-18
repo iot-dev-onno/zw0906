@@ -97,6 +97,10 @@ void blink1()
 // void printResponse(uint8_t *response, uint8_t length);
 
 bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs = 50);
+bool match();  // <<--- NUEVA
+// --- PROTOTIPOS DE UTILIDADES (deben ir antes de usarlas)
+inline void drainSerial1Rx(uint32_t idle_us = 2000);
+bool readFpPacket(uint8_t *buf, size_t bufmax, size_t &outlen, uint32_t timeout_ms = 500);
 
 
 void printHex(uint8_t* data, uint8_t len) {
@@ -147,7 +151,7 @@ void setup() {
 
 
 }
-
+/*
 void loop() {
 //Serial.println(presscount);
 
@@ -253,17 +257,16 @@ if(press){
 
 
 //
+/*
 static bool busy = false;
 const uint32_t HOLD_MATCH_MS = 1000;
-const uint32_t HOLD_ENROLL_MS = 5000;
+const uint32_t HOLD_ENROLL_MS = 3000;
 
 uint8_t pc;
-//noInterrupts();
-deatachInterrupt(INT1);
 pc = presscount;
-attachInterrupt(INT1);
-//interrupts();
+*/
 
+/*
 if (!busy && pc >= 2 && waitHoldRearm(INT1, HOLD_ENROLL_MS)) {
   busy = true;
 
@@ -315,11 +318,106 @@ else if (!busy && pc == 1 && waitHoldRearm(INT1, HOLD_MATCH_MS)) {
   attachInterrupt(INT1, blink1, RISING);
   busy = false;
   delay(300);
-} else if ()
+} *//*
+// --- PRIMERO: MATCH (1 pulso + hold) ---
+  if (!busy && pc <= 1 && waitHoldRearm(INT1, HOLD_MATCH_MS, 150)) {
+    busy = true;
 
-Serial.println(pc);
+    detachInterrupt(INT1);
+    digitalWrite(gps_v_en, LOW);
+    delay(300);
+
+    send_get_image_cmd(CMD_GET_IMAGE);
+    send_cmd2(CMD_GEN_CHAR, 0x06);
+    response_codes = sendCommand1(CMD_SEARCH, 1, 1, 1);
+
+    Serial.printf("confirmation code: %02X \r\n", response_codes.confirmation);
+    Serial.printf("page number:       %02X \r\n", response_codes.page);
+    Serial.printf("score:             %02X \r\n", response_codes.score);
+    Serial.printf("\r\n");
+
+    if (response_codes.confirmation == 0x09) {
+      sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0100);
+      sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
+    }
+    if (response_codes.confirmation == 0x00 && response_codes.score > 0x08) {
+      sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0010);
+      sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
+    }
+
+    noInterrupts(); presscount = 0; press = false; interrupts();
+    digitalWrite(gps_v_en, HIGH);
+    delay(50);
+    attachInterrupt(INT1, blink1, RISING);
+    busy = false;
+    delay(200);
+  }
+  // --- LUEGO: ENROLL (>=2 pulsos + hold) ---
+  else if (!busy && pc >= 2 && waitHoldRearm(INT1, HOLD_ENROLL_MS, 150)) {
+    busy = true;
+
+    detachInterrupt(INT1);
+    digitalWrite(gps_v_en, LOW);
+    delay(300);
+    enrroll();
+
+    noInterrupts(); presscount = 0; press = false; interrupts();
+    digitalWrite(gps_v_en, HIGH);
+    delay(50);
+    attachInterrupt(INT1, blink1, RISING);
+    busy = false;
+    delay(200);
+    Serial.printf("confirmation code: %02X \r\n", response_codes.confirmation);
+
+  }
+
+//Serial.println(pc);
 
 // termina loop 
+}*/
+void loop() {
+  static bool busy = false;
+  const uint32_t HOLD_MATCH_MS  = 1000;
+  const uint32_t HOLD_ENROLL_MS = 3000;
+
+  uint8_t pc = presscount;
+
+  if (digitalRead(INT1) == HIGH) {
+    lastActivityMs = millis();
+  } else if (!busy && (millis() - lastActivityMs >= 2000)) {
+    noInterrupts();
+    presscount = 0;
+    press = false;
+    interrupts();
+  }
+
+  // --- PRIMERO: MATCH (>=1 pulso + hold) ---
+  if (!busy && pc <= 1 && waitHoldRearm(INT1, HOLD_MATCH_MS, 150)) {
+    busy = true;
+    bool ok = match(); // <<--- aquí se hace todo el MATCH y LED
+    noInterrupts(); presscount = 0; press = false; interrupts();
+    busy = false;
+    delay(200);
+    Serial.print("Estoy terminando de hacer MATCH\r\n");
+  }
+  // --- LUEGO: ENROLL (>=2 pulsos + hold) ---
+  else if (!busy && pc >= 2 && waitHoldRearm(INT1, HOLD_ENROLL_MS, 150)) {
+    busy = true;
+    detachInterrupt(INT1);
+    digitalWrite(gps_v_en, LOW);  // power ON
+    delay(300);
+    enrroll();
+    noInterrupts(); presscount = 0; press = false; interrupts();
+    digitalWrite(gps_v_en, HIGH); // power OFF
+    delay(50);
+    attachInterrupt(INT1, blink1, RISING);
+    busy = false;
+    delay(200);
+    Serial.printf("confirmation code: %02X \r\n", response_codes.confirmation);
+    Serial.print("Estoy terminando de hacer enroll\r\n");
+  }
+  //Serial.println(pc);
+
 }
 
 
@@ -399,510 +497,280 @@ int read_FP_info(void)
 
 
 // Send command
+// Send command (NO lee respuesta; usado por read_FP_info)
 void send_cmd(uint8_t cmd) {
+  drainSerial1Rx();                         // << nuevo
 
   uint8_t packet[12];
   uint16_t length=3;
   uint16_t checksum =  1+length+cmd;
 
-  // build command package
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0] = HEADER_HIGH; packet[1] = HEADER_LOW;
+  packet[2] = (DEVICE_ADDRESS >> 24) & 0xFF;
+  packet[3] = (DEVICE_ADDRESS >> 16) & 0xFF;
+  packet[4] = (DEVICE_ADDRESS >> 8)  & 0xFF;
+  packet[5] =  DEVICE_ADDRESS        & 0xFF;
+  packet[6] = 0x01;
+  packet[7] = (length >> 8) & 0xFF;  packet[8] = length & 0xFF;
+  packet[9] = cmd;
+  packet[10] = (checksum >> 8) & 0xFF; packet[11] = checksum & 0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = (uint8_t)(DEVICE_ADDRESS & 0xFF);
-
-  packet[6] = 0x01;  // Packet identifier: command packet
-
-  packet[7] = (uint8_t)((length >> 8) & 0xFF);  // Packet length high byte
-  packet[8] = length & 0xFF;  // Packet length low byte
-
-  packet[9] = cmd;// Define command codes
-  
-  packet[10] = (checksum >> 8) & 0xFF;
-  packet[11] = checksum & 0xFF;
-
-  // Serial.println("send1:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
-  }
-
-  
+  for (int i = 0; i < 12; i++) Serial1.write(packet[i]);
 }
+
 
 
 // LED CONTROL
 // sendCommand_led(CMD_PS_ControlBLN,0X03,0X07); checkout response lenght
+// LED CONTROL
 void sendCommand_led(uint8_t cmd, uint8_t param1, uint8_t param2) {
+  drainSerial1Rx();                         // << nuevo
 
-  uint8_t response[32];
-
-  for (int i = 0; i < 32; ++i) {
-      response[i] = 0;
-  }
-
-  uint8_t index = 0;
-
-
+  uint8_t response[32]; size_t rlen=0;
 
   uint8_t packet[16];
   uint16_t length=7;
   uint16_t checksum =  1+length+cmd + param1 + param2 ;
 
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=param1;
+  packet[11]=param2;
+  packet[12]=0x00;  // end color
+  packet[13]=0x00;  // cycles
+  packet[14]=(checksum>>8)&0xFF; packet[15]=checksum&0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = DEVICE_ADDRESS & 0xFF;
+  for (int i=0;i<16;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01; // package id
-
-  packet[7] = (length >> 8) & 0xFF;  // packet lenght
-  packet[8] = length & 0xFF;
-
-  packet[9] = cmd; // script code
-
-  packet[10] = param1; // function code
-
-  packet[11] = param2; // starting color
-
-  packet[12] = 0x00; // end color
-
-  packet[13] = 0x00; // cycles
-
-  packet[14] = (uint8_t)((checksum >> 8) & 0xFF);
-
-  packet[15] = checksum & 0xFF;
-
-  // Serial.println("send:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
-  }
-  uint32_t startTime = millis();
-  while (millis() - startTime < 300) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  // printResponse(response, index);
-
-
+  // leer ACK alineado (opcional imprimir)
+  readFpPacket(response, sizeof(response), rlen, 300);
+  // printResponse(response, (uint8_t)rlen);
 }
+
 
 
 
 // DELETE DATABASE
 //send_clear_cmd(CMD_CLEAR_LIB); check for the byte that indicates an error
+// DELETE DATABASE
 void send_clear_cmd(uint8_t cmd) {
+  drainSerial1Rx();                         // << nuevo
 
-  uint8_t response[32];
+  uint8_t response[32]; size_t rlen=0;
 
-  for (int i = 0; i < 32; ++i) {
-      response[i] = 0;
-  }
-
-  uint8_t index = 0;
-
-  
   uint8_t packet[12];
   uint16_t length=3;
   uint16_t checksum =  1+length+cmd;
 
-  // build command package
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=(checksum>>8)&0xFF; packet[11]=checksum&0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = (uint8_t)(DEVICE_ADDRESS & 0xFF);
+  for (int i=0;i<12;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01;  // Packet identifier: command packet
-
-  packet[7] = (uint8_t)((length >> 8) & 0xFF);  // Packet length high byte
-  packet[8] = length & 0xFF;  // Packet length low byte
-
-  packet[9] = cmd;// Define command codes
-  
-  packet[10] = (checksum >> 8) & 0xFF;
-  packet[11] = checksum & 0xFF;
-
-  // Serial.println("send1:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
+  if (readFpPacket(response, sizeof(response), rlen, 1000)) {
+    Serial.println("clear response:");
+    printResponse(response, (uint8_t)rlen);
   }
-
-
-
-  uint32_t startTime = millis();
-  while (millis() - startTime < 1000) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  Serial.println("clear response:");
-  printResponse(response, index);
-  
 }
+
 
 
 // GET IMAGE
 //send_get_image_cmd(CMD_GET_IMAGE); check for the byte about info return
+// GET IMAGE
 void send_get_image_cmd(uint8_t cmd) {
+  drainSerial1Rx();                         // << nuevo
 
-  uint8_t response[32];
+  uint8_t response[32]; size_t rlen=0;
 
-  for (int i = 0; i < 32; ++i) {
-      response[i] = 0;
-  }
-
-  uint8_t index = 0;
-
-  
   uint8_t packet[12];
   uint16_t length=3;
   uint16_t checksum =  1+length+cmd;
 
-  // build command package
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=(checksum>>8)&0xFF; packet[11]=checksum&0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = (uint8_t)(DEVICE_ADDRESS & 0xFF);
+  for (int i=0;i<12;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01;  // Packet identifier: command packet
-
-  packet[7] = (uint8_t)((length >> 8) & 0xFF);  // Packet length high byte
-  packet[8] = length & 0xFF;  // Packet length low byte
-
-  packet[9] = cmd;// Define command codes
-  
-  packet[10] = (checksum >> 8) & 0xFF;
-  packet[11] = checksum & 0xFF;
-
-  // Serial.println("send1:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
-  }
-
-
-
-  uint32_t startTime = millis();
-  while (millis() - startTime < 300) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  // Serial.println("merge response:");
-  // printResponse(response, index);
-  
+  // ACK corto; no imprimimos para no saturar
+  readFpPacket(response, sizeof(response), rlen, 300);
 }
 
 
 
+
 void send_cmd2(uint8_t cmd, uint8_t param1 ) {
+  drainSerial1Rx();                         // << nuevo
 
-  uint8_t response[32];
-
-  for (int i = 0; i < 32; ++i) {
-      response[i] = 0;
-  }
-
-  uint8_t index = 0;
+  uint8_t response[32]; size_t rlen=0;
 
   uint8_t packet[13];
   uint16_t length=4;
   uint16_t checksum =  1+length+cmd + param1;
 
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=param1;
+  packet[11]=(checksum>>8)&0xFF; packet[12]=checksum&0xFF;
 
-  packet[2] = (DEVICE_ADDRESS >> 24) & 0xFF;
-  packet[3] = (DEVICE_ADDRESS >> 16) & 0xFF;
-  packet[4] = (DEVICE_ADDRESS >> 8) & 0xFF;
-  packet[5] = DEVICE_ADDRESS & 0xFF;
+  for (int i=0;i<13;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01;  
-
-  packet[7] = (length >> 8) & 0xFF;  
-  packet[8] = length & 0xFF;
-
-  packet[9] = cmd;
-
-  packet[10] = param1;
-
-  packet[11] = (checksum >> 8) & 0xFF;
-  packet[12] = checksum & 0xFF;
-
-  // Serial.println("send2:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
-  }
-
-
-  uint32_t startTime = millis();
-  while (millis() - startTime < 300) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  // Serial.println("genchar response:");
-  // printResponse(response, index);
-
-
+  readFpPacket(response, sizeof(response), rlen, 300);
+  // printResponse(response, (uint8_t)rlen);
 }
+
 
 
 // REGISTER IMAGE
 // merge_feature_cmd(CMD_REG_MODEL); 3.3.1.5 Merge feature PS_RegModel
+// REGISTER IMAGE
 void merge_feature_cmd(uint8_t cmd) {
+  drainSerial1Rx();                         // << nuevo
 
+  uint8_t response[32]; size_t rlen=0;
 
-
-
-  uint8_t response[32];
-
-  for (int i = 0; i < 32; ++i) {
-      response[i] = 0;
-  }
-
-  uint8_t index = 0;
-
-  
   uint8_t packet[12];
   uint16_t length=3;
   uint16_t checksum =  1+length+cmd;
 
-  // build command package
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=(checksum>>8)&0xFF; packet[11]=checksum&0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = (uint8_t)(DEVICE_ADDRESS & 0xFF);
+  for (int i=0;i<12;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01;  // Packet identifier: command packet
-
-  packet[7] = (uint8_t)((length >> 8) & 0xFF);  // Packet length high byte
-  packet[8] = length & 0xFF;  // Packet length low byte
-
-  packet[9] = cmd;// Define command codes
-  
-  packet[10] = (checksum >> 8) & 0xFF;
-  packet[11] = checksum & 0xFF;
-
-  // Serial.println("send1:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
+  if (readFpPacket(response, sizeof(response), rlen, 1000)) {
+    Serial.println("merge response:");
+    printResponse(response, (uint8_t)rlen);
   }
-
-
-
-  uint32_t startTime = millis();
-  while (millis() - startTime < 1000) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  Serial.println("merge response:");
-  printResponse(response, index);
-  
 }
 
+
+// SEND COMMAND 2 VARIABLES
 // SEND COMMAND 2 VARIABLES
 void sendCommand(uint8_t cmd, uint8_t param1, uint16_t param2) {
+  drainSerial1Rx();                         // << nuevo
 
-  uint8_t response[32];
-  uint8_t index = 0;
+  uint8_t response[64]; size_t rlen=0;
 
   uint8_t packet[15];
   uint16_t length=6;
   uint16_t checksum =  1+length+cmd + param1 + (param2 >> 8) + (param2 & 0xFF);
 
-  // 构建指令包
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=param1;
+  packet[11]=(param2>>8)&0xFF; packet[12]=param2&0xFF;
+  packet[13]=(checksum>>8)&0xFF; packet[14]=checksum&0xFF;
 
-  packet[2] = (uint8_t)((DEVICE_ADDRESS >> 24) & 0xFF);
-  packet[3] = (uint8_t)((DEVICE_ADDRESS >> 16) & 0xFF);
-  packet[4] = (uint8_t)((DEVICE_ADDRESS >> 8) & 0xFF);
-  packet[5] = DEVICE_ADDRESS & 0xFF;
+  for (int i=0;i<15;i++) Serial1.write(packet[i]);
 
-  packet[6] = 0x01;  // 包标识：命令包
-
-  packet[7] = (length >> 8) & 0xFF;  // 包长度高字节
-  packet[8] = length & 0xFF;  // 包长度低字节
-
-  packet[9] = cmd;
-
-  packet[10] = param1;
-
-  packet[11] = (uint8_t)((param2 >> 8) & 0xFF);
-  packet[12] = param2 & 0xFF;
-
-  packet[13] = (uint8_t)((checksum >> 8) & 0xFF);
-  packet[14] = checksum & 0xFF;
-
-  // Serial.println("send:");
-  // printHex(packet,(2+4+3+length));
-
-  for (int i = 0; i < (2+4+3+length); i++) {
-    Serial1.write(packet[i]);
+  if (readFpPacket(response, sizeof(response), rlen, 500)) {
+    Serial.println("sent command  response:");
+    printResponse(response, (uint8_t)rlen);
   }
-
-  uint32_t startTime = millis();
-  while (millis() - startTime < 500) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-      if (index >= 12) break; // check for index lenght per particular command response
-    }
-  }
-
-  Serial.println("sent command  response:");
-  printResponse(response, index);
-  
-
 }
 
-
-
-// 1 COMMAND, 3 VARIABLES
+// 1 COMMAND, 3 VARIABLES (SEARCH/MATCH)
 values sendCommand1(uint8_t cmd, uint8_t param1, uint16_t param2, uint16_t param3) {
-  values localStruct;
+  values localStruct{0,0,0};
 
-  uint8_t response[32];
+  drainSerial1Rx();                         // << nuevo
 
-  for (int i = 0; i < 32; ++i) { // clear response array
-      response[i] = 0;
-  }
-
-
+  uint8_t response[64]; size_t rlen=0;
 
   uint8_t packet[17];
   uint16_t length=8;
-  uint16_t checksum =  1+length+cmd + param1 + (param2 >> 8) + (param2 & 0xFF) + (param3 >> 8) + (param3 & 0xFF);
+  uint16_t checksum =  1+length+cmd + param1
+                    + (param2 >> 8) + (param2 & 0xFF)
+                    + (param3 >> 8) + (param3 & 0xFF);
 
-  
-  packet[0] = HEADER_HIGH;
-  packet[1] = HEADER_LOW;
+  packet[0]=HEADER_HIGH; packet[1]=HEADER_LOW;
+  packet[2]=(DEVICE_ADDRESS>>24)&0xFF;
+  packet[3]=(DEVICE_ADDRESS>>16)&0xFF;
+  packet[4]=(DEVICE_ADDRESS>>8)&0xFF;
+  packet[5]= DEVICE_ADDRESS&0xFF;
+  packet[6]=0x01;
+  packet[7]=(length>>8)&0xFF; packet[8]=length&0xFF;
+  packet[9]=cmd;
+  packet[10]=param1;
+  packet[11]=(param2>>8)&0xFF; packet[12]=param2&0xFF;
+  packet[13]=(param3>>8)&0xFF; packet[14]=param3&0xFF;
+  packet[15]=(checksum>>8)&0xFF; packet[16]=checksum&0xFF;
 
-  packet[2] = (DEVICE_ADDRESS >> 24) & 0xFF;
-  packet[3] = (DEVICE_ADDRESS >> 16) & 0xFF;
-  packet[4] = (DEVICE_ADDRESS >> 8) & 0xFF;
-  packet[5] = DEVICE_ADDRESS & 0xFF;
+  for (int i=0;i<17;i++) Serial1.write(packet[i]);
+  Serial1.flush();
 
-  packet[6] = 0x01;  
-
-  packet[7] = (length >> 8) & 0xFF;  
-  packet[8] = length & 0xFF;  
-
-  packet[9] = cmd;
-
-  packet[10] = param1;
-
-  packet[11] = (param2 >> 8) & 0xFF;
-  packet[12] = param2 & 0xFF;
-
-  packet[13] = (param3 >> 8) & 0xFF;
-  packet[14] = param3 & 0xFF;
-
-  packet[15] = (checksum >> 8) & 0xFF;
-  packet[16] = checksum & 0xFF;
-
-  // Serial.println("send:");
-  // printHex(packet,(2+4+3+length));
-  
-
-  for (int i = 0; i < 17; i++) {// to 17
-    Serial1.write(packet[i]);
-  }
-  Serial1.flush(); 
-
-  uint8_t index = 0;
-  uint32_t startTime = millis();
-
-  while (millis() - startTime < 500) {
-    if (Serial1.available()>0) {
-      response[index] = Serial1.read();
-      if (index >= 16){break;}  // check for index lenght per particular command response
-      index=index+1;
-    }
+  if (!readFpPacket(response, sizeof(response), rlen, 500)) {
+    Serial.println("sent command  response: <timeout/sin cabecera>");
+    return localStruct;
   }
 
   Serial.println("sent command  response:");
-  printResponse(response, 16);
+  printResponse(response, (uint8_t)rlen);
 
-  // Serial.println();
-  // Serial.println("------------------------------------------");  
-  // Serial.println();
-
-  // Serial.printf("confirmation code: %02X \r\n",response[9]);
-  // Serial.printf("page number:       %02X%02X \r\n",response[10],response[11]);
-  // Serial.printf("score:             %02X%02X \r\n",response[12],response[13]);
-
-  localStruct.confirmation = response[9];
-  localStruct.page = response[11];
-  localStruct.score = response[13];
+  // Offset de contenido dentro del ACK:
+  const uint8_t OFF = 2 + 4 + 1 + 2; // EF01 + addr + PID + Length
+  // SEARCH devuelve: [confirm(1)] [pageID(2)] [matchScore(2)]
+  localStruct.confirmation = response[OFF + 0];
+  localStruct.page         = response[OFF + 2]; // low byte para mantener tu interfaz
+  localStruct.score        = response[OFF + 4]; // low byte
 
   return localStruct;
-
 }
-
-
-
-
 
 
 
 bool receiveResponse() {
-  uint8_t response[50];
-  uint8_t index = 0;
-
-  uint32_t startTime = millis();
-
-  while (millis() - startTime < 200) {
-    if (Serial1.available()) {
-      response[index++] = Serial1.read();
-    }
-  }
-
-  printResponse(response, index);
-
-  if (index >= 12) {
-    return true;  
-  } else {
-    return false; 
-  }
+  uint8_t response[64]; size_t rlen=0;
+  if (!readFpPacket(response, sizeof(response), rlen, 200)) return false;
+  printResponse(response, (uint8_t)rlen);
+  return (rlen >= 12);
 }
+
+
+
+
+
+
 
 // print response packet
 void printResponse(uint8_t *response, uint8_t length) {
@@ -915,37 +783,7 @@ void printResponse(uint8_t *response, uint8_t length) {
   Serial.println();
 }
 
-bool waitHold(uint8_t pin, uint32_t holdMs){
-  static bool waiting = false;
-  static uint32_t t0 = 0;
-
-  if (!waiting){
-    noInterrupts();
-    bool edge = press;
-    if (edge){
-      press = false;
-      waiting = true;
-      t0 = millis();
-    }
-    interrupts();
-  }
-  if (waiting) {
-    if (digitalRead(pin)==HIGH){
-      if (millis() - t0 >= holdMs){
-        waiting = false;
-        return true;
-      }
-    } else{
-      waiting = false;
-    }
-  }
-  return false;
-}
-
-// Devuelve true una sola vez cuando el pin se mantuvo HIGH por holdMs.
-// Incluye: rearmado por LOW y rising por software como respaldo.
-// releaseDebounceMs: cuánto tiempo debe estar LOW para rearmar.
-
+// --- DETECTOR DE HOLD CON REARME ---
 bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs) {
   static bool waiting = false;
   static bool rearm = false;
@@ -955,7 +793,6 @@ bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs) {
 
   int cur = digitalRead(pin);
 
-  // 0) Rearme LOW estable
   if (rearm) {
     if (cur == LOW) {
       if (tLow == 0) tLow = millis();
@@ -970,31 +807,25 @@ bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs) {
     return false;
   }
 
-  // 1) Flanco por ISR o por software
   bool edge = false;
   noInterrupts();
-  if (press) { edge = true; press = false; }  // << quitar 'extern'
+  if (press) { edge = true; press = false; }
   interrupts();
 
   if (!edge && last == LOW && cur == HIGH) edge = true;
 
-  // 2) Arrancar hold
-  if (!waiting && edge) {
-    waiting = true;
-    t0 = millis();
-  }
+  if (!waiting && edge) { waiting = true; t0 = millis(); }
 
-  // 3) Verificar hold continuo
   if (waiting) {
     if (cur == HIGH) {
       if (millis() - t0 >= holdMs) {
         waiting = false;
-        rearm = true;     // exigir LOW antes del siguiente ciclo
+        rearm = true;
         last = cur;
         return true;
       }
     } else {
-      waiting = false;    // se soltó antes de tiempo
+      waiting = false;
     }
   }
 
@@ -1003,25 +834,100 @@ bool waitHoldRearm(uint8_t pin, uint32_t holdMs, uint32_t releaseDebounceMs) {
 }
 
 void enrroll(){
-    // register fingerprint
-
-    send_get_image_cmd(CMD_GET_IMAGE);
-    delay(100);
-    
-    send_cmd2(CMD_GEN_CHAR,0x06);
-    delay(100);
-
-    merge_feature_cmd(CMD_REG_MODEL);
-    delay(100);
-
-    sendCommand(CMD_STORE_CHAR,6,3); // command store, buffer id, page id, juan 1,2. sam 3
-    delay(1000);
+  send_get_image_cmd(CMD_GET_IMAGE);
+  delay(100);
+  send_cmd2(CMD_GEN_CHAR,0x06);
+  delay(100);
+  merge_feature_cmd(CMD_REG_MODEL);
+  delay(100);
+  sendCommand(CMD_STORE_CHAR,6,3); // buffer id=6, page id=3 (ajústalo a tu lógica)
+  delay(1000);
 }
 
-inline void resetPressCounter() {
-  noInterrupts();
-  presscount = 0;
-  press = false;        // opcional: limpia también el flag del edge
-  interrupts();
+// ================== MATCH (NUEVO) ==================
+bool match() {
+  // Aísla la secuencia completa de MATCH + feedback LED
+  detachInterrupt(INT1);
+  digitalWrite(gps_v_en, LOW);   // power ON sensor
+  delay(300);
+
+  send_get_image_cmd(CMD_GET_IMAGE);
+  send_cmd2(CMD_GEN_CHAR, 0x06);
+  values r = sendCommand1(CMD_SEARCH, 1, 1, 1);
+
+  Serial.printf("confirmation code: %02X \r\n", r.confirmation);
+  Serial.printf("page number:       %02X \r\n", r.page);
+  Serial.printf("score:             %02X \r\n", r.score);
+  Serial.printf("\r\n");
+
+  // LED: rojo si no encontrado (0x09), verde si OK (0x00 y score > 0x08)
+  if (r.confirmation == 0x09) {
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0100);
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
+  } else if (r.confirmation == 0x00 && r.score > 0x08) {
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0010);
+    sendCommand_led(CMD_PS_ControlBLN, 0x03, 0b0000);
+  }
+
+  // Actualiza el global para compatibilidad con tus prints fuera
+  response_codes = r;
+
+  digitalWrite(gps_v_en, HIGH);  // power OFF sensor (ahorro)
+  delay(50);
+  attachInterrupt(INT1, blink1, RISING);
+
+  return (r.confirmation == 0x00 && r.score > 0x08);
 }
+
+// --- PURGAR RX ANTES DE ENVIAR ---
+inline void drainSerial1Rx(uint32_t idle_us) {
+  uint32_t t = micros();
+  while (micros() - t < idle_us) {
+    while (Serial1.available()) { Serial1.read(); t = micros(); }
+  }
+}
+// Lee un paquete alineando a EF 01 y usando Length.
+bool readFpPacket(uint8_t *buf, size_t bufmax, size_t &outlen, uint32_t timeout_ms) {
+  outlen = 0;
+  uint32_t t0 = millis();
+
+  // Buscar EF 01
+  int state = 0; // 0: buscando EF, 1: esperando 01
+  while (millis() - t0 < timeout_ms) {
+    int c = Serial1.read();
+    if (c < 0) continue;
+    uint8_t b = (uint8_t)c;
+
+    if (state == 0) {
+      if (b == 0xEF) { buf[outlen++] = b; state = 1; }
+    } else {
+      if (b == 0x01) { buf[outlen++] = b; break; }
+      state = (b == 0xEF) ? 1 : 0;
+      outlen = (state == 1) ? (buf[0] = 0xEF, 1) : 0;
+    }
+  }
+  if (outlen < 2) return false;
+
+  // Leer Address(4) + PID(1) + Length(2)
+  while (outlen < 2 + 4 + 1 + 2) {
+    if (millis() - t0 >= timeout_ms) return false;
+    int c = Serial1.read(); if (c < 0) continue;
+    buf[outlen++] = (uint8_t)c;
+  }
+
+  // Length = contenido + checksum(2)
+  uint16_t L = ((uint16_t)buf[2+4+1] << 8) | buf[2+4+1+1];
+  size_t total = 2 + 4 + 1 + 2 + (size_t)L;
+  if (total > bufmax) return false;
+
+  // Leer el resto
+  while (outlen < total) {
+    if (millis() - t0 >= timeout_ms) return false;
+    int c = Serial1.read(); if (c < 0) continue;
+    buf[outlen++] = (uint8_t)c;
+  }
+  return true;
+}
+
+
 
